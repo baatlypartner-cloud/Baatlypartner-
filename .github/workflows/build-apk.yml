@@ -93,4 +93,4 @@ jobs:
         shell: bash
         run: |
           rm -f "$RUNNER_TEMP/baatly-partner-upload.jks"
-          rm -f "$RUNNER_TEMP/test-upload.p12" 
+          rm -f "$RUNNER_TEMP/test-upload.p12"
