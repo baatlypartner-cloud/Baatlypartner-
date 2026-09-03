@@ -1,97 +1,17 @@
-name: Build Baatly Partner APK
+name: Verify Baatly Partner Keystore
 
 'on':
   workflow_dispatch:
-  push:
-    paths:
-      - "*.zip"
-      - ".github/workflows/build-apk.yml"
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK
-        run: |
-          yes | sdkmanager --licenses || true
-          sdkmanager "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Extract Partner ZIP
-        shell: bash
-        run: |
-          set -e
-
-          ZIP_FILE=$(find . -maxdepth 1 -type f -name "*.zip" | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Partner ZIP not found."
-            exit 1
-          fi
-
-          echo "Using ZIP: $ZIP_FILE"
-
-          rm -rf _partner_project
-          mkdir -p _partner_project
-
-          unzip -q "$ZIP_FILE" -d _partner_project
-
-          if [ -f "_partner_project/gradlew" ]; then
-            PROJECT_DIR="_partner_project"
-          else
-            GRADLEW_PATH=$(find _partner_project -type f -name gradlew | head -n 1)
-
-            if [ -z "$GRADLEW_PATH" ]; then
-              echo "ERROR: gradlew not found inside Partner ZIP."
-              exit 1
-            fi
-
-            PROJECT_DIR=$(dirname "$GRADLEW_PATH")
-          fi
-
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "ERROR: gradlew not found."
-            exit 1
-          fi
-
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-          echo "Partner project: $PROJECT_DIR"
-
-      - name: Create .env
-        shell: bash
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
-          AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
-        run: |
-          set -e
-
-          cat > "$PROJECT_DIR/.env" <<EOF
-          SUPABASE_URL=$SUPABASE_URL
-          SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY
-          AGORA_APP_ID=$AGORA_APP_ID
-          EOF
-
-          chmod 600 "$PROJECT_DIR/.env"
-
-      - name: Prepare release keystore
+      - name: Prepare keystore
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
 
@@ -105,82 +25,58 @@ jobs:
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_FILE"
 
           if [ ! -s "$KEYSTORE_FILE" ]; then
-            echo "ERROR: Keystore could not be created."
+            echo "ERROR: Keystore file is empty."
             exit 1
           fi
 
-          echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
-          echo "STORE_PASSWORD=$STORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "KEY_PASSWORD=$KEY_PASSWORD" >> "$GITHUB_ENV"
+          echo "KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
 
-          echo "Release keystore prepared successfully."
-
-      - name: Verify release signing configuration
+      - name: Verify keystore password and alias
         shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
           set -e
 
-          if [ -z "$KEYSTORE_PATH" ]; then
-            echo "ERROR: KEYSTORE_PATH is not set."
-            exit 1
-          fi
+          keytool -list \
+            -keystore "$KEYSTORE_FILE" \
+            -storetype JKS \
+            -storepass "$STORE_PASSWORD" \
+            -alias upload
 
-          if [ ! -f "$KEYSTORE_PATH" ]; then
-            echo "ERROR: Keystore file not found."
-            exit 1
-          fi
+          echo "SUCCESS: Store password and alias 'upload' are valid."
 
-          if [ -z "$STORE_PASSWORD" ]; then
-            echo "ERROR: STORE_PASSWORD is empty."
-            exit 1
-          fi
-
-          if [ -z "$KEY_PASSWORD" ]; then
-            echo "ERROR: KEY_PASSWORD is empty."
-            exit 1
-          fi
-
-          echo "Signing configuration environment is ready."
-
-      - name: Build Signed Release APK
+      - name: Verify private key password
         shell: bash
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           set -e
 
-          cd "$PROJECT_DIR"
+          TMP_EXPORT="$RUNNER_TEMP/baatly-test-key.pem"
 
-          chmod +x gradlew
+          keytool -importkeystore \
+            -srckeystore "$KEYSTORE_FILE" \
+            -srcstoretype JKS \
+            -srcstorepass "$STORE_PASSWORD" \
+            -srcalias upload \
+            -srckeypass "$KEY_PASSWORD" \
+            -destkeystore "$RUNNER_TEMP/test.p12" \
+            -deststoretype PKCS12 \
+            -deststorepass "$STORE_PASSWORD" \
+            -destkeypass "$STORE_PASSWORD" \
+            -noprompt \
+            >/dev/null
 
-          ./gradlew --no-daemon clean :app:assembleRelease
+          echo "SUCCESS: Private key password is valid."
+          echo "SUCCESS: The 'upload' private key can be read."
+          echo "KEYSTORE VERIFICATION PASSED."
 
-      - name: Verify Release APK
-        shell: bash
-        run: |
-          set -e
-
-          APK_PATH="$PROJECT_DIR/app/build/outputs/apk/release/app-release.apk"
-
-          if [ ! -f "$APK_PATH" ]; then
-            echo "ERROR: Signed release APK not found."
-            exit 1
-          fi
-
-          echo "========================================"
-          echo "Baatly Partner Release APK created"
-          echo "========================================"
-
-          ls -lh "$APK_PATH"
-
-      - name: Upload Release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: baatly-partner-release-apk
-          path: "${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/app-release.apk"
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Cleanup signing keystore
+      - name: Cleanup
         if: always()
         shell: bash
         run: |
           rm -f "$RUNNER_TEMP/baatly-partner-upload.jks"
+          rm -f "$RUNNER_TEMP/test.p12"
+          rm -f "$RUNNER_TEMP/baatly-test-key.pem"
