@@ -1,7 +1,10 @@
 name: Verify Baatly Partner Keystore
 
-'on':
+on:
   workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-apk.yml"
 
 jobs:
   verify:
@@ -31,6 +34,8 @@ jobs:
 
           echo "KEYSTORE_FILE=$KEYSTORE_FILE" >> "$GITHUB_ENV"
 
+          echo "Keystore file created successfully."
+
       - name: Verify keystore password and alias
         shell: bash
         env:
@@ -38,13 +43,19 @@ jobs:
         run: |
           set -e
 
+          if [ -z "$STORE_PASSWORD" ]; then
+            echo "ERROR: STORE_PASSWORD secret is missing."
+            exit 1
+          fi
+
           keytool -list \
             -keystore "$KEYSTORE_FILE" \
             -storetype JKS \
             -storepass "$STORE_PASSWORD" \
             -alias upload
 
-          echo "SUCCESS: Store password and alias 'upload' are valid."
+          echo "SUCCESS: Store password is valid."
+          echo "SUCCESS: Alias 'upload' exists."
 
       - name: Verify private key password
         shell: bash
@@ -54,7 +65,12 @@ jobs:
         run: |
           set -e
 
-          TMP_EXPORT="$RUNNER_TEMP/baatly-test-key.pem"
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "ERROR: KEY_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          TEST_KEYSTORE="$RUNNER_TEMP/test-upload.p12"
 
           keytool -importkeystore \
             -srckeystore "$KEYSTORE_FILE" \
@@ -62,15 +78,14 @@ jobs:
             -srcstorepass "$STORE_PASSWORD" \
             -srcalias upload \
             -srckeypass "$KEY_PASSWORD" \
-            -destkeystore "$RUNNER_TEMP/test.p12" \
+            -destkeystore "$TEST_KEYSTORE" \
             -deststoretype PKCS12 \
             -deststorepass "$STORE_PASSWORD" \
             -destkeypass "$STORE_PASSWORD" \
-            -noprompt \
-            >/dev/null
+            -noprompt
 
           echo "SUCCESS: Private key password is valid."
-          echo "SUCCESS: The 'upload' private key can be read."
+          echo "SUCCESS: Upload key can be read."
           echo "KEYSTORE VERIFICATION PASSED."
 
       - name: Cleanup
@@ -78,5 +93,4 @@ jobs:
         shell: bash
         run: |
           rm -f "$RUNNER_TEMP/baatly-partner-upload.jks"
-          rm -f "$RUNNER_TEMP/test.p12"
-          rm -f "$RUNNER_TEMP/baatly-test-key.pem"
+          rm -f "$RUNNER_TEMP/test-upload.p12" 
