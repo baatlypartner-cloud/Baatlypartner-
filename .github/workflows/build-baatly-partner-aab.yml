@@ -1,4 +1,4 @@
- name: Baatly Partner AAB Build
+name: Baatly Partner AAB Build
 
 on:
   push:
