@@ -1,6 +1,12 @@
-name: Build Baatly Partner Release AAB
+ name: Build Baatly Partner Release AAB
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "**.zip"
+
   workflow_dispatch:
 
 permissions:
@@ -27,7 +33,7 @@ jobs:
             exit 1
           fi
 
-          echo "Source ZIP: $ZIP_FILE"
+          echo "Source ZIP found: $ZIP_FILE"
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Extract source ZIP
@@ -40,8 +46,7 @@ jobs:
 
           unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
 
-          echo "Extracted source:"
-          find extracted -maxdepth 3 -type f | head -150
+          echo "Source extracted successfully."
 
       - name: Locate Android project
         id: locate_project
@@ -55,15 +60,15 @@ jobs:
           \) | head -n 1)"
 
           if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle/settings.gradle.kts not found."
+            echo "ERROR: settings.gradle or settings.gradle.kts not found."
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
 
           if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "ERROR: gradlew not found in Android project directory."
-            echo "Project directory: $PROJECT_DIR"
+            echo "ERROR: gradlew not found."
+            echo "Android project directory: $PROJECT_DIR"
             exit 1
           fi
 
@@ -96,18 +101,21 @@ jobs:
             > "$RUNNER_TEMP/baatly-partner-release.jks"
 
           if [ ! -s "$RUNNER_TEMP/baatly-partner-release.jks" ]; then
-            echo "ERROR: Keystore decoding failed."
+            echo "ERROR: Failed to decode release keystore."
             exit 1
           fi
 
           echo "Release keystore decoded successfully."
 
-      - name: Prepare Gradle wrapper
+      - name: Prepare Gradle
         working-directory: ${{ steps.locate_project.outputs.project_dir }}
         shell: bash
         run: |
           set -euo pipefail
+
           chmod +x ./gradlew
+
+          echo "Gradle wrapper ready."
 
       - name: Build signed Release AAB
         working-directory: ${{ steps.locate_project.outputs.project_dir }}
@@ -129,7 +137,11 @@ jobs:
             exit 1
           fi
 
-          ./gradlew clean bundleRelease --no-daemon --stacktrace
+          echo "Starting Release AAB build..."
+
+          ./gradlew clean bundleRelease \
+            --no-daemon \
+            --stacktrace
 
       - name: Find generated AAB
         id: find_aab
@@ -148,7 +160,7 @@ jobs:
             exit 1
           fi
 
-          echo "Generated AAB: $AAB_FILE"
+          echo "AAB generated: $AAB_FILE"
           echo "aab_file=$AAB_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Upload Partner AAB
@@ -165,3 +177,12 @@ jobs:
           path: |
             ${{ steps.locate_project.outputs.project_dir }}/**/build/outputs/mapping/**
           if-no-files-found: ignore
+
+      - name: Build summary
+        shell: bash
+        run: |
+          echo "======================================"
+          echo " BAATLY PARTNER AAB BUILD COMPLETED"
+          echo "======================================"
+          echo "AAB Artifact: baatly-partner-release-aab"
+          echo "Build Status: SUCCESS"
