@@ -19,9 +19,13 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Show repository files
+        shell: bash
         run: |
+          set -e
           echo "Repository files:"
-          find . -maxdepth 3 -type f | sort | head -300
+          find . -maxdepth 3 -type f \
+            ! -path "./.git/*" \
+            | sort | head -300
 
       - name: Find Partner ZIP
         id: zip
@@ -30,16 +34,16 @@ jobs:
           set -e
 
           ZIP_FILE=$(find . -maxdepth 2 -type f \
-            \( -iname "*.zip" \) \
+            -iname "*.zip" \
             ! -path "./.git/*" \
             | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: No ZIP file found in repository root."
+            echo "ERROR: Partner ZIP was not found."
             exit 1
           fi
 
-          echo "Found ZIP: $ZIP_FILE"
+          echo "Partner ZIP found: $ZIP_FILE"
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Extract Partner ZIP
@@ -53,7 +57,6 @@ jobs:
           unzip -q "${{ steps.zip.outputs.zip_file }}" -d source
 
           echo "ZIP extracted successfully."
-          find source -maxdepth 4 -type f | sort | head -300
 
       - name: Find Android project
         id: project
@@ -64,13 +67,20 @@ jobs:
           GRADLEW=$(find source -type f -name "gradlew" | head -n 1)
 
           if [ -z "$GRADLEW" ]; then
-            echo "ERROR: gradlew was not found."
+            echo "ERROR: gradlew was not found in Partner ZIP."
+            echo "Searching for Gradle files:"
+            find source -type f \
+              \( -name "settings.gradle" \
+              -o -name "settings.gradle.kts" \
+              -o -name "build.gradle" \
+              -o -name "build.gradle.kts" \) \
+              | sort
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$GRADLEW")
 
-          echo "Android project found:"
+          echo "Android project:"
           echo "$PROJECT_DIR"
 
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
@@ -84,7 +94,7 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Check signing secrets
+      - name: Verify signing secrets
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -93,22 +103,22 @@ jobs:
         run: |
           set -e
 
-          if [ -z "$KEYSTORE_BASE64" ]; then
+          test -n "$KEYSTORE_BASE64" || {
             echo "ERROR: KEYSTORE_BASE64 secret is missing."
             exit 1
-          fi
+          }
 
-          if [ -z "$KEY_PASSWORD" ]; then
+          test -n "$KEY_PASSWORD" || {
             echo "ERROR: KEY_PASSWORD secret is missing."
             exit 1
-          fi
+          }
 
-          if [ -z "$STORE_PASSWORD" ]; then
+          test -n "$STORE_PASSWORD" || {
             echo "ERROR: STORE_PASSWORD secret is missing."
             exit 1
-          fi
+          }
 
-          echo "All required signing secrets are available."
+          echo "All signing secrets are available."
 
       - name: Decode release keystore
         env:
@@ -122,12 +132,15 @@ jobs:
 
           test -s "$RUNNER_TEMP/baatly-partner-release.jks"
 
-          echo "Keystore decoded successfully."
+          echo "Release keystore decoded successfully."
 
-      - name: Make Gradle executable
+      - name: Prepare Gradle
         working-directory: ${{ steps.project.outputs.project_dir }}
+        shell: bash
         run: |
+          set -e
           chmod +x ./gradlew
+          ./gradlew --version
 
       - name: Build Release AAB
         working-directory: ${{ steps.project.outputs.project_dir }}
@@ -139,27 +152,38 @@ jobs:
         run: |
           set -e
 
+          echo "Building Release AAB..."
+
           ./gradlew clean bundleRelease \
             --no-daemon \
             --stacktrace
 
-      - name: Find AAB
+          echo "Gradle build completed."
+
+      - name: Locate generated AAB
         id: aab
         working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
           set -e
 
-          AAB=$(find . -type f \
+          AAB=$(find . \
+            -type f \
             -path "*/build/outputs/bundle/*/*.aab" \
             | head -n 1)
 
           if [ -z "$AAB" ]; then
-            echo "ERROR: No AAB file was generated."
+            echo "ERROR: AAB was not generated."
+            echo "Available bundle files:"
+            find . -type f -path "*/build/outputs/*" | sort
             exit 1
           fi
 
-          echo "AAB found: $AAB"
+          AAB="${AAB#./}"
+
+          echo "Generated AAB:"
+          echo "$AAB"
+
           echo "aab=$AAB" >> "$GITHUB_OUTPUT"
 
       - name: Upload Release AAB
@@ -168,9 +192,21 @@ jobs:
           name: baatly-partner-release-aab
           path: ${{ steps.project.outputs.project_dir }}/${{ steps.aab.outputs.aab }}
           if-no-files-found: error
+          retention-days: 30
 
-      - name: Build completed
+      - name: Upload mapping files
+        uses: actions/upload-artifact@v4
+        with:
+          name: baatly-partner-mapping-files
+          path: |
+            ${{ steps.project.outputs.project_dir }}/**/build/outputs/mapping/**
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Build Success
+        shell: bash
         run: |
-          echo "======================================"
-          echo " BAATLY PARTNER AAB BUILD SUCCESSFUL "
-          echo "======================================"
+          echo "=========================================="
+          echo " BAATLY PARTNER RELEASE AAB - SUCCESS "
+          echo "=========================================="
+          echo "AAB artifact: baatly-partner-release-aab"
