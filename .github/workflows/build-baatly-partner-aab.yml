@@ -1,78 +1,78 @@
- name: Build Baatly Partner Release AAB
+ name: Baatly Partner AAB Build
 
 on:
   push:
     branches:
       - main
-    paths:
-      - "**.zip"
-
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  build-partner-aab:
+  build:
+    name: Build Release AAB
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find source ZIP
-        id: find_zip
+      - name: Show repository files
+        run: |
+          echo "Repository files:"
+          find . -maxdepth 3 -type f | sort | head -300
+
+      - name: Find Partner ZIP
+        id: zip
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          ZIP_FILE="$(find . -type f -iname '*.zip' ! -path './.git/*' | head -n 1)"
+          ZIP_FILE=$(find . -maxdepth 2 -type f \
+            \( -iname "*.zip" \) \
+            ! -path "./.git/*" \
+            | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Partner source ZIP not found in repository."
+            echo "ERROR: No ZIP file found in repository root."
             exit 1
           fi
 
-          echo "Source ZIP found: $ZIP_FILE"
+          echo "Found ZIP: $ZIP_FILE"
           echo "zip_file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
 
-      - name: Extract source ZIP
+      - name: Extract Partner ZIP
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          rm -rf extracted
-          mkdir -p extracted
+          rm -rf source
+          mkdir -p source
 
-          unzip -q "${{ steps.find_zip.outputs.zip_file }}" -d extracted
+          unzip -q "${{ steps.zip.outputs.zip_file }}" -d source
 
-          echo "Source extracted successfully."
+          echo "ZIP extracted successfully."
+          find source -maxdepth 4 -type f | sort | head -300
 
-      - name: Locate Android project
-        id: locate_project
+      - name: Find Android project
+        id: project
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          SETTINGS_FILE="$(find extracted -type f \( \
-            -name 'settings.gradle' \
-            -o -name 'settings.gradle.kts' \
-          \) | head -n 1)"
+          GRADLEW=$(find source -type f -name "gradlew" | head -n 1)
 
-          if [ -z "$SETTINGS_FILE" ]; then
-            echo "ERROR: settings.gradle or settings.gradle.kts not found."
+          if [ -z "$GRADLEW" ]; then
+            echo "ERROR: gradlew was not found."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          PROJECT_DIR=$(dirname "$GRADLEW")
 
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "ERROR: gradlew not found."
-            echo "Android project directory: $PROJECT_DIR"
-            exit 1
-          fi
+          echo "Android project found:"
+          echo "$PROJECT_DIR"
 
-          echo "Android project: $PROJECT_DIR"
           echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
 
       - name: Setup Java 17
@@ -80,109 +80,97 @@ jobs:
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Check signing secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        run: |
+          set -e
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "ERROR: KEYSTORE_BASE64 secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "ERROR: KEY_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$STORE_PASSWORD" ]; then
+            echo "ERROR: STORE_PASSWORD secret is missing."
+            exit 1
+          fi
+
+          echo "All required signing secrets are available."
 
       - name: Decode release keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         shell: bash
         run: |
-          set -euo pipefail
-
-          if [ -z "${KEYSTORE_BASE64:-}" ]; then
-            echo "ERROR: KEYSTORE_BASE64 secret is missing."
-            exit 1
-          fi
+          set -e
 
           echo "$KEYSTORE_BASE64" | base64 --decode \
             > "$RUNNER_TEMP/baatly-partner-release.jks"
 
-          if [ ! -s "$RUNNER_TEMP/baatly-partner-release.jks" ]; then
-            echo "ERROR: Failed to decode release keystore."
-            exit 1
-          fi
+          test -s "$RUNNER_TEMP/baatly-partner-release.jks"
 
-          echo "Release keystore decoded successfully."
+          echo "Keystore decoded successfully."
 
-      - name: Prepare Gradle
-        working-directory: ${{ steps.locate_project.outputs.project_dir }}
-        shell: bash
+      - name: Make Gradle executable
+        working-directory: ${{ steps.project.outputs.project_dir }}
         run: |
-          set -euo pipefail
-
           chmod +x ./gradlew
 
-          echo "Gradle wrapper ready."
-
-      - name: Build signed Release AAB
-        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+      - name: Build Release AAB
+        working-directory: ${{ steps.project.outputs.project_dir }}
         env:
           KEYSTORE_PATH: ${{ runner.temp }}/baatly-partner-release.jks
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         shell: bash
         run: |
-          set -euo pipefail
-
-          if [ -z "${KEY_PASSWORD:-}" ]; then
-            echo "ERROR: KEY_PASSWORD secret is missing."
-            exit 1
-          fi
-
-          if [ -z "${STORE_PASSWORD:-}" ]; then
-            echo "ERROR: STORE_PASSWORD secret is missing."
-            exit 1
-          fi
-
-          echo "Starting Release AAB build..."
+          set -e
 
           ./gradlew clean bundleRelease \
             --no-daemon \
             --stacktrace
 
-      - name: Find generated AAB
-        id: find_aab
-        working-directory: ${{ steps.locate_project.outputs.project_dir }}
+      - name: Find AAB
+        id: aab
+        working-directory: ${{ steps.project.outputs.project_dir }}
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
 
-          AAB_FILE="$(find . \
-            -type f \
-            -path '*/build/outputs/bundle/*/*.aab' \
-            | head -n 1)"
+          AAB=$(find . -type f \
+            -path "*/build/outputs/bundle/*/*.aab" \
+            | head -n 1)
 
-          if [ -z "$AAB_FILE" ]; then
-            echo "ERROR: Release AAB was not generated."
+          if [ -z "$AAB" ]; then
+            echo "ERROR: No AAB file was generated."
             exit 1
           fi
 
-          echo "AAB generated: $AAB_FILE"
-          echo "aab_file=$AAB_FILE" >> "$GITHUB_OUTPUT"
+          echo "AAB found: $AAB"
+          echo "aab=$AAB" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Partner AAB
+      - name: Upload Release AAB
         uses: actions/upload-artifact@v4
         with:
           name: baatly-partner-release-aab
-          path: ${{ steps.locate_project.outputs.project_dir }}/${{ steps.find_aab.outputs.aab_file }}
+          path: ${{ steps.project.outputs.project_dir }}/${{ steps.aab.outputs.aab }}
           if-no-files-found: error
 
-      - name: Upload mapping files
-        uses: actions/upload-artifact@v4
-        with:
-          name: baatly-partner-mapping-files
-          path: |
-            ${{ steps.locate_project.outputs.project_dir }}/**/build/outputs/mapping/**
-          if-no-files-found: ignore
-
-      - name: Build summary
-        shell: bash
+      - name: Build completed
         run: |
           echo "======================================"
-          echo " BAATLY PARTNER AAB BUILD COMPLETED"
+          echo " BAATLY PARTNER AAB BUILD SUCCESSFUL "
           echo "======================================"
-          echo "AAB Artifact: baatly-partner-release-aab"
-          echo "Build Status: SUCCESS"
