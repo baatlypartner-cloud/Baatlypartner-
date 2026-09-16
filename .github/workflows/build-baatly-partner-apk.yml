@@ -139,7 +139,7 @@ jobs:
             | head -400
 
       # ==========================================================
-      # 5. LOCATE ACTUAL GRADLE PROJECT
+      # 5. LOCATE PARTNER ANDROID PROJECT
       # ==========================================================
       - name: Locate Partner Android project
         id: project
@@ -159,11 +159,26 @@ jobs:
 
           if [ "${#GRADLEW_FILES[@]}" -eq 0 ]; then
             echo "ERROR: gradlew not found inside Partner ZIP."
+
+            echo
+            echo "Gradle-related files found:"
+            find "$RUNNER_TEMP/baatly-partner-project" \
+              -type f \
+              \( \
+                -name "settings.gradle" \
+                -o -name "settings.gradle.kts" \
+                -o -name "build.gradle" \
+                -o -name "build.gradle.kts" \
+              \) \
+              -print \
+              | sort
+
             exit 1
           fi
 
           if [ "${#GRADLEW_FILES[@]}" -ne 1 ]; then
             echo "ERROR: Expected exactly one gradlew."
+            echo "Found:"
             printf '%s\n' "${GRADLEW_FILES[@]}"
             exit 1
           fi
@@ -186,7 +201,7 @@ jobs:
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       # ==========================================================
-      # 6. VERIFY PARTNER CONFIGURATION
+      # 6. VERIFY PARTNER PROJECT CONFIGURATION
       # ==========================================================
       - name: Verify Partner project configuration
         working-directory: ${{ env.PROJECT_DIR }}
@@ -217,7 +232,7 @@ jobs:
             || true
 
       # ==========================================================
-      # 7. SETUP JAVA 17
+      # 7. SETUP JDK 17
       # ==========================================================
       - name: Setup JDK 17
         uses: actions/setup-java@v6
@@ -274,6 +289,8 @@ jobs:
           if [ -z "$SDKMANAGER" ]; then
             echo "ERROR: sdkmanager not found."
 
+            echo
+            echo "Searching Android SDK:"
             find "$ANDROID_SDK_ROOT" \
               -type f \
               -name "sdkmanager" \
@@ -293,7 +310,7 @@ jobs:
           "$SDKMANAGER" --version
 
       # ==========================================================
-      # 11. INSTALL REQUIRED ANDROID SDK
+      # 11. INSTALL REQUIRED ANDROID SDK PACKAGES
       # ==========================================================
       - name: Install Android SDK packages
         shell: bash
@@ -309,7 +326,31 @@ jobs:
             "build-tools;36.0.0"
 
       # ==========================================================
-      # 12. VERIFY SDK
+      # 12. ADD BUILD TOOLS TO PATH
+      #
+      # This fixes:
+      # apksigner: command not found
+      # ==========================================================
+      - name: Add Android Build Tools to PATH
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BUILD_TOOLS_DIR="$ANDROID_SDK_ROOT/build-tools/36.0.0"
+
+          if [ ! -d "$BUILD_TOOLS_DIR" ]; then
+            echo "ERROR: Android Build Tools directory not found:"
+            echo "$BUILD_TOOLS_DIR"
+            exit 1
+          fi
+
+          echo "$BUILD_TOOLS_DIR" >> "$GITHUB_PATH"
+
+          echo "Android Build Tools added to PATH:"
+          echo "$BUILD_TOOLS_DIR"
+
+      # ==========================================================
+      # 13. VERIFY ANDROID SDK
       # ==========================================================
       - name: Verify Android SDK
         shell: bash
@@ -320,10 +361,17 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/platforms/android-36.1"
           test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
 
+          test -f "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+
+          echo
           echo "Android SDK verification PASSED."
 
+          echo
+          echo "apksigner:"
+          "$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner" --version
+
       # ==========================================================
-      # 13. CHECK SIGNING SECRETS
+      # 14. CHECK SIGNING SECRETS
       # ==========================================================
       - name: Check signing secrets
         shell: bash
@@ -352,7 +400,7 @@ jobs:
           echo "All required signing secrets are present."
 
       # ==========================================================
-      # 14. RESTORE RELEASE KEYSTORE
+      # 15. RESTORE RELEASE KEYSTORE
       # ==========================================================
       - name: Restore release keystore
         working-directory: ${{ env.PROJECT_DIR }}
@@ -380,7 +428,7 @@ jobs:
           ls -lh "$KEYSTORE_FILE"
 
       # ==========================================================
-      # 15. VERIFY KEYSTORE + ALIAS
+      # 16. VERIFY RELEASE KEYSTORE
       # ==========================================================
       - name: Verify release keystore
         working-directory: ${{ env.PROJECT_DIR }}
@@ -401,7 +449,7 @@ jobs:
           echo "Key alias 'upload' verified."
 
       # ==========================================================
-      # 16. VERIFY GRADLE
+      # 17. VERIFY GRADLE
       # ==========================================================
       - name: Verify Gradle
         working-directory: ${{ env.PROJECT_DIR }}
@@ -415,10 +463,8 @@ jobs:
           ./gradlew --version
 
       # ==========================================================
-      # 17. BUILD PARTNER RELEASE APK
+      # 18. BUILD SIGNED RELEASE APK
       #
-      # IMPORTANT:
-      # AAB uses bundleRelease
       # APK uses assembleRelease
       # ==========================================================
       - name: Build Baatly Partner Release APK
@@ -440,7 +486,7 @@ jobs:
             --warning-mode all
 
       # ==========================================================
-      # 18. VERIFY GENERATED APK
+      # 19. VERIFY GENERATED APK
       # ==========================================================
       - name: Verify generated APK
         working-directory: ${{ env.PROJECT_DIR }}
@@ -470,7 +516,7 @@ jobs:
           ls -lh "$APK_FILE"
 
       # ==========================================================
-      # 19. VERIFY APK SIGNATURE
+      # 20. VERIFY APK SIGNATURE
       # ==========================================================
       - name: Verify APK signature
         working-directory: ${{ env.PROJECT_DIR }}
@@ -479,16 +525,29 @@ jobs:
           set -euo pipefail
 
           APK_FILE="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/36.0.0/apksigner"
+
+          if [ ! -f "$APK_FILE" ]; then
+            echo "ERROR: APK not found:"
+            echo "$APK_FILE"
+            exit 1
+          fi
+
+          if [ ! -f "$APKSIGNER" ]; then
+            echo "ERROR: apksigner not found:"
+            echo "$APKSIGNER"
+            exit 1
+          fi
 
           echo "Verifying APK signature..."
 
-          apksigner verify --verbose "$APK_FILE"
+          "$APKSIGNER" verify --verbose "$APK_FILE"
 
           echo
           echo "APK signature verification PASSED."
 
       # ==========================================================
-      # 20. PREPARE RELEASE ARTIFACT
+      # 21. PREPARE APK ARTIFACT
       # ==========================================================
       - name: Prepare Partner APK artifact
         working-directory: ${{ env.PROJECT_DIR }}
@@ -508,7 +567,7 @@ jobs:
           ls -lh release-artifacts/baatly-partner-release.apk
 
       # ==========================================================
-      # 21. UPLOAD APK
+      # 22. UPLOAD APK
       # ==========================================================
       - name: Upload Baatly Partner Release APK
         uses: actions/upload-artifact@v4
@@ -519,7 +578,7 @@ jobs:
           retention-days: 30
 
       # ==========================================================
-      # 22. SUCCESS
+      # 23. SUCCESS
       # ==========================================================
       - name: Build Success
         shell: bash
@@ -529,4 +588,4 @@ jobs:
           echo "================================================"
           echo
           echo "Output:"
-          echo "${{ env.PROJECT_DIR }}/release-artifacts/baatly-partner-release.apk"
+          echo "${{ env.PROJECT_DIR }}/release-artifacts/baatly-partner-release.apk" 
