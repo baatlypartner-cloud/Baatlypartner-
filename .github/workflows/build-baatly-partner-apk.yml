@@ -1,0 +1,532 @@
+name: Build Baatly Partner Release APK
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Baatly Partner Release APK
+    runs-on: ubuntu-latest
+
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
+
+    steps:
+
+      # ==========================================================
+      # 1. CHECKOUT REPOSITORY
+      # ==========================================================
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # ==========================================================
+      # 2. INSPECT REPOSITORY
+      # ==========================================================
+      - name: Inspect repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Repository root:"
+          pwd
+
+          echo
+          echo "Repository contents:"
+          ls -lah
+
+          echo
+          echo "ZIP files:"
+          find . \
+            -maxdepth 3 \
+            -type f \
+            \( -iname "*.zip" -o -iname "*.ZIP" \) \
+            -print \
+            | sort
+
+      # ==========================================================
+      # 3. FIND BAATLY PARTNER ZIP
+      # ==========================================================
+      - name: Locate Baatly Partner ZIP
+        id: zip
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t ZIP_FILES < <(
+            find "$GITHUB_WORKSPACE" \
+              -type f \
+              \( -iname "*.zip" -o -iname "*.ZIP" \) \
+              ! -path "*/.git/*" \
+              -print \
+              | sort
+          )
+
+          echo "Total ZIP files found: ${#ZIP_FILES[@]}"
+
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: No ZIP file found in the GitHub repository."
+            exit 1
+          fi
+
+          echo
+          echo "ZIP files found:"
+          printf '%s\n' "${ZIP_FILES[@]}"
+
+          mapfile -t PARTNER_ZIPS < <(
+            printf '%s\n' "${ZIP_FILES[@]}" \
+              | grep -Ei 'baatly[-_ ]?partner.*\.zip$' \
+              || true
+          )
+
+          if [ "${#PARTNER_ZIPS[@]}" -eq 1 ]; then
+            SELECTED_ZIP="${PARTNER_ZIPS[0]}"
+
+          elif [ "${#PARTNER_ZIPS[@]}" -gt 1 ]; then
+            echo "ERROR: Multiple Baatly Partner ZIP files found."
+            echo "Keep only the latest Partner source ZIP in the repository."
+            printf '%s\n' "${PARTNER_ZIPS[@]}"
+            exit 1
+
+          elif [ "${#ZIP_FILES[@]}" -eq 1 ]; then
+            SELECTED_ZIP="${ZIP_FILES[0]}"
+
+          else
+            echo "ERROR: Multiple ZIP files found and none clearly identifies Baatly Partner."
+            echo "Keep exactly one Partner source ZIP in the repository."
+            printf '%s\n' "${ZIP_FILES[@]}"
+            exit 1
+          fi
+
+          echo
+          echo "Selected Partner ZIP:"
+          echo "$SELECTED_ZIP"
+
+          echo "SOURCE_ZIP=$SELECTED_ZIP" >> "$GITHUB_ENV"
+
+      # ==========================================================
+      # 4. EXTRACT ZIP
+      # ==========================================================
+      - name: Extract Baatly Partner ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          EXTRACT_DIR="$RUNNER_TEMP/baatly-partner-project"
+
+          rm -rf "$EXTRACT_DIR"
+          mkdir -p "$EXTRACT_DIR"
+
+          echo "Extracting source ZIP:"
+          echo "$SOURCE_ZIP"
+
+          unzip -q "$SOURCE_ZIP" -d "$EXTRACT_DIR"
+
+          echo
+          echo "ZIP extraction completed."
+
+          echo
+          echo "Extracted files:"
+          find "$EXTRACT_DIR" \
+            -maxdepth 4 \
+            -type f \
+            | sort \
+            | head -400
+
+      # ==========================================================
+      # 5. LOCATE ACTUAL GRADLE PROJECT
+      # ==========================================================
+      - name: Locate Partner Android project
+        id: project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Searching extracted ZIP for gradlew..."
+
+          mapfile -t GRADLEW_FILES < <(
+            find "$RUNNER_TEMP/baatly-partner-project" \
+              -type f \
+              -name "gradlew" \
+              -print \
+              | sort
+          )
+
+          if [ "${#GRADLEW_FILES[@]}" -eq 0 ]; then
+            echo "ERROR: gradlew not found inside Partner ZIP."
+            exit 1
+          fi
+
+          if [ "${#GRADLEW_FILES[@]}" -ne 1 ]; then
+            echo "ERROR: Expected exactly one gradlew."
+            printf '%s\n' "${GRADLEW_FILES[@]}"
+            exit 1
+          fi
+
+          GRADLEW_PATH="${GRADLEW_FILES[0]}"
+          PROJECT_DIR="$(dirname "$GRADLEW_PATH")"
+
+          echo
+          echo "Partner Android project:"
+          echo "$PROJECT_DIR"
+
+          test -f "$PROJECT_DIR/gradlew"
+          test -f "$PROJECT_DIR/settings.gradle.kts"
+          test -f "$PROJECT_DIR/build.gradle.kts"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      # ==========================================================
+      # 6. VERIFY PARTNER CONFIGURATION
+      # ==========================================================
+      - name: Verify Partner project configuration
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Project directory:"
+          pwd
+
+          echo
+          echo "Gradle wrapper configuration:"
+          grep '^distributionUrl=' \
+            gradle/wrapper/gradle-wrapper.properties
+
+          echo
+          echo "Partner Android configuration:"
+          grep -nE \
+            'namespace|applicationId|compileSdk|minorApiLevel|targetSdk|versionCode|versionName' \
+            app/build.gradle.kts \
+            || true
+
+          echo
+          echo "Signing configuration:"
+          grep -nE \
+            'KEYSTORE_PATH|STORE_PASSWORD|keyAlias|KEY_PASSWORD' \
+            app/build.gradle.kts \
+            || true
+
+      # ==========================================================
+      # 7. SETUP JAVA 17
+      # ==========================================================
+      - name: Setup JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ==========================================================
+      # 8. VERIFY JAVA
+      # ==========================================================
+      - name: Verify Java 17
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "JAVA_HOME=$JAVA_HOME"
+
+          echo
+          echo "Java version:"
+          java -version
+
+      # ==========================================================
+      # 9. SETUP ANDROID SDK
+      # ==========================================================
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: '14742923'
+          packages: ''
+
+      # ==========================================================
+      # 10. FIND SDKMANAGER
+      # ==========================================================
+      - name: Locate Android SDK manager
+        id: sdk
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDKMANAGER="$(command -v sdkmanager || true)"
+
+          if [ -z "$SDKMANAGER" ]; then
+            if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/20.0/bin/sdkmanager" ]; then
+              SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/20.0/bin/sdkmanager"
+            fi
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            if [ -x "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+              SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+            fi
+          fi
+
+          if [ -z "$SDKMANAGER" ]; then
+            echo "ERROR: sdkmanager not found."
+
+            find "$ANDROID_SDK_ROOT" \
+              -type f \
+              -name "sdkmanager" \
+              -print \
+              || true
+
+            exit 1
+          fi
+
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+
+          echo "Using sdkmanager:"
+          echo "$SDKMANAGER"
+
+          echo
+          echo "sdkmanager version:"
+          "$SDKMANAGER" --version
+
+      # ==========================================================
+      # 11. INSTALL REQUIRED ANDROID SDK
+      # ==========================================================
+      - name: Install Android SDK packages
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Installing required Android SDK packages..."
+
+          "$SDKMANAGER" \
+            --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "platforms;android-36.1" \
+            "build-tools;36.0.0"
+
+      # ==========================================================
+      # 12. VERIFY SDK
+      # ==========================================================
+      - name: Verify Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -d "$ANDROID_SDK_ROOT/platform-tools"
+          test -d "$ANDROID_SDK_ROOT/platforms/android-36.1"
+          test -d "$ANDROID_SDK_ROOT/build-tools/36.0.0"
+
+          echo "Android SDK verification PASSED."
+
+      # ==========================================================
+      # 13. CHECK SIGNING SECRETS
+      # ==========================================================
+      - name: Check signing secrets
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$KEYSTORE_BASE64" ]; then
+            echo "ERROR: KEYSTORE_BASE64 GitHub secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$STORE_PASSWORD" ]; then
+            echo "ERROR: STORE_PASSWORD GitHub secret is missing."
+            exit 1
+          fi
+
+          if [ -z "$KEY_PASSWORD" ]; then
+            echo "ERROR: KEY_PASSWORD GitHub secret is missing."
+            exit 1
+          fi
+
+          echo "All required signing secrets are present."
+
+      # ==========================================================
+      # 14. RESTORE RELEASE KEYSTORE
+      # ==========================================================
+      - name: Restore release keystore
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEYSTORE_FILE="$PWD/my-upload-key.jks"
+
+          printf '%s' "$KEYSTORE_BASE64" \
+            | base64 --decode \
+            > "$KEYSTORE_FILE"
+
+          if [ ! -s "$KEYSTORE_FILE" ]; then
+            echo "ERROR: Restored keystore is empty."
+            exit 1
+          fi
+
+          echo "KEYSTORE_PATH=$KEYSTORE_FILE" >> "$GITHUB_ENV"
+
+          echo
+          echo "Release keystore restored:"
+          ls -lh "$KEYSTORE_FILE"
+
+      # ==========================================================
+      # 15. VERIFY KEYSTORE + ALIAS
+      # ==========================================================
+      - name: Verify release keystore
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          keytool \
+            -list \
+            -keystore ./my-upload-key.jks \
+            -storepass "$STORE_PASSWORD" \
+            -alias upload \
+            > /tmp/partner-keytool-output.txt
+
+          echo "Release keystore verified."
+          echo "Key alias 'upload' verified."
+
+      # ==========================================================
+      # 16. VERIFY GRADLE
+      # ==========================================================
+      - name: Verify Gradle
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          chmod +x ./gradlew
+
+          echo "Gradle version:"
+          ./gradlew --version
+
+      # ==========================================================
+      # 17. BUILD PARTNER RELEASE APK
+      #
+      # IMPORTANT:
+      # AAB uses bundleRelease
+      # APK uses assembleRelease
+      # ==========================================================
+      - name: Build Baatly Partner Release APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "================================================"
+          echo "       BAATLY PARTNER RELEASE APK BUILD"
+          echo "================================================"
+
+          ./gradlew clean assembleRelease \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all
+
+      # ==========================================================
+      # 18. VERIFY GENERATED APK
+      # ==========================================================
+      - name: Verify generated APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="app/build/outputs/apk/release/app-release.apk"
+
+          if [ ! -f "$APK_FILE" ]; then
+            echo "ERROR: Expected Partner APK was not generated:"
+            echo "$APK_FILE"
+
+            echo
+            echo "Searching for generated APK files:"
+            find . \
+              -type f \
+              -name "*.apk" \
+              -print \
+              || true
+
+            exit 1
+          fi
+
+          echo
+          echo "Partner APK generated successfully:"
+          ls -lh "$APK_FILE"
+
+      # ==========================================================
+      # 19. VERIFY APK SIGNATURE
+      # ==========================================================
+      - name: Verify APK signature
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_FILE="app/build/outputs/apk/release/app-release.apk"
+
+          echo "Verifying APK signature..."
+
+          apksigner verify --verbose "$APK_FILE"
+
+          echo
+          echo "APK signature verification PASSED."
+
+      # ==========================================================
+      # 20. PREPARE RELEASE ARTIFACT
+      # ==========================================================
+      - name: Prepare Partner APK artifact
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf release-artifacts
+          mkdir -p release-artifacts
+
+          cp \
+            app/build/outputs/apk/release/app-release.apk \
+            release-artifacts/baatly-partner-release.apk
+
+          echo
+          echo "Prepared Partner APK:"
+          ls -lh release-artifacts/baatly-partner-release.apk
+
+      # ==========================================================
+      # 21. UPLOAD APK
+      # ==========================================================
+      - name: Upload Baatly Partner Release APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: baatly-partner-release-apk
+          path: ${{ env.PROJECT_DIR }}/release-artifacts/baatly-partner-release.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      # ==========================================================
+      # 22. SUCCESS
+      # ==========================================================
+      - name: Build Success
+        shell: bash
+        run: |
+          echo "================================================"
+          echo "   BAATLY PARTNER APK BUILD SUCCESS"
+          echo "================================================"
+          echo
+          echo "Output:"
+          echo "${{ env.PROJECT_DIR }}/release-artifacts/baatly-partner-release.apk"
