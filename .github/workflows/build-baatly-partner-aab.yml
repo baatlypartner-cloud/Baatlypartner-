@@ -18,50 +18,52 @@ jobs:
 
     steps:
 
-      # =========================================================
+      # =====================================================
       # 1. Checkout repository
-      # =========================================================
+      # =====================================================
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      # =========================================================
-      # 2. Setup JDK 17
-      # =========================================================
+      # =====================================================
+      # 2. Setup Java 17
+      # IMPORTANT:
+      # No Gradle cache here because the Android project
+      # is inside the uploaded ZIP.
+      # =====================================================
       - name: Setup Java 17
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
-          cache: gradle
 
-      # =========================================================
+      # =====================================================
       # 3. Verify source ZIP
-      # =========================================================
+      # =====================================================
       - name: Verify source ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Checking Partner App source ZIP..."
+          echo "Checking Partner App ZIP..."
 
           if [[ ! -f "$SOURCE_ZIP" ]]; then
+            echo "ERROR: Partner App ZIP not found."
             echo ""
-            echo "ERROR: Source ZIP not found."
-            echo "Expected file:"
+            echo "Expected:"
             echo "$SOURCE_ZIP"
             echo ""
-            echo "ZIP files found in repository:"
+            echo "Available ZIP files:"
             find . -maxdepth 2 -type f -iname "*.zip" -print || true
             exit 1
           fi
 
           echo ""
-          echo "Source ZIP found:"
+          echo "Partner ZIP found:"
           ls -lh "$SOURCE_ZIP"
 
-      # =========================================================
-      # 4. Extract ZIP
-      # =========================================================
+      # =====================================================
+      # 4. Extract Partner project
+      # =====================================================
       - name: Extract Partner project
         shell: bash
         run: |
@@ -72,48 +74,69 @@ jobs:
 
           unzip -q "$SOURCE_ZIP" -d "$PROJECT_DIR"
 
-          echo "ZIP extracted successfully."
+          echo "Partner project extracted."
 
-      # =========================================================
-      # 5. Verify exact Android project structure
-      # =========================================================
-      - name: Verify Android project
+          echo ""
+          echo "Extracted files:"
+          find "$PROJECT_DIR" -maxdepth 2 -type f -print | sort | head -200
+
+      # =====================================================
+      # 5. Detect Gradle project root
+      # =====================================================
+      - name: Detect Partner Gradle project
         shell: bash
         run: |
           set -euo pipefail
 
-          if [[ ! -f "$PROJECT_DIR/gradlew" ]]; then
-            echo "ERROR: gradlew not found."
+          FOUND_GRADLEW="$(find "$PROJECT_DIR" \
+            -type f \
+            -name "gradlew" \
+            -print -quit)"
+
+          if [[ -z "$FOUND_GRADLEW" ]]; then
+            echo "ERROR: gradlew was not found inside Partner ZIP."
             exit 1
           fi
 
-          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
-            echo "ERROR: settings.gradle.kts not found."
+          DETECTED_ROOT="$(dirname "$FOUND_GRADLEW")"
+
+          echo "Detected Gradle project root:"
+          echo "$DETECTED_ROOT"
+
+          if [[ ! -f "$DETECTED_ROOT/settings.gradle.kts" ]] && \
+             [[ ! -f "$DETECTED_ROOT/settings.gradle" ]]; then
+            echo "ERROR: Gradle settings file not found."
             exit 1
           fi
 
-          if [[ ! -f "$PROJECT_DIR/build.gradle.kts" ]]; then
-            echo "ERROR: Root build.gradle.kts not found."
+          if [[ ! -f "$DETECTED_ROOT/app/build.gradle.kts" ]] && \
+             [[ ! -f "$DETECTED_ROOT/app/build.gradle" ]]; then
+            echo "ERROR: app Gradle build file not found."
             exit 1
           fi
 
-          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
-            echo "ERROR: app/build.gradle.kts not found."
-            exit 1
-          fi
+          echo "$DETECTED_ROOT" > project_root.txt
 
-          if [[ ! -d "$PROJECT_DIR/app" ]]; then
-            echo "ERROR: app module not found."
-            exit 1
-          fi
+          echo ""
+          echo "Partner project verified."
 
-          chmod +x "$PROJECT_DIR/gradlew"
+      # =====================================================
+      # 6. Prepare Gradle wrapper
+      # =====================================================
+      - name: Prepare Gradle wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          echo "Partner Android project verified successfully."
+          PROJECT_ROOT="$(cat project_root.txt)"
 
-      # =========================================================
-      # 6. Create production .env from GitHub Secrets
-      # =========================================================
+          chmod +x "$PROJECT_ROOT/gradlew"
+
+          echo "Gradle wrapper prepared."
+
+      # =====================================================
+      # 7. Create .env from GitHub Secrets
+      # =====================================================
       - name: Create production environment
         shell: bash
         env:
@@ -123,34 +146,36 @@ jobs:
         run: |
           set -euo pipefail
 
+          PROJECT_ROOT="$(cat project_root.txt)"
+
           if [[ -z "${SUPABASE_URL:-}" ]]; then
-            echo "ERROR: GitHub Secret SUPABASE_URL is missing."
+            echo "ERROR: SUPABASE_URL secret is missing."
             exit 1
           fi
 
           if [[ -z "${SUPABASE_PUBLISHABLE_KEY:-}" ]]; then
-            echo "ERROR: GitHub Secret SUPABASE_PUBLISHABLE_KEY is missing."
+            echo "ERROR: SUPABASE_PUBLISHABLE_KEY secret is missing."
             exit 1
           fi
 
           if [[ -z "${AGORA_APP_ID:-}" ]]; then
-            echo "ERROR: GitHub Secret AGORA_APP_ID is missing."
+            echo "ERROR: AGORA_APP_ID secret is missing."
             exit 1
           fi
 
-          {
-            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
-            printf 'SUPABASE_PUBLISHABLE_KEY=%s\n' "$SUPABASE_PUBLISHABLE_KEY"
-            printf 'AGORA_APP_ID=%s\n' "$AGORA_APP_ID"
-          } > "$PROJECT_DIR/.env"
+          printf '%s\n' \
+            "SUPABASE_URL=$SUPABASE_URL" \
+            "SUPABASE_PUBLISHABLE_KEY=$SUPABASE_PUBLISHABLE_KEY" \
+            "AGORA_APP_ID=$AGORA_APP_ID" \
+            > "$PROJECT_ROOT/.env"
 
-          chmod 600 "$PROJECT_DIR/.env"
+          chmod 600 "$PROJECT_ROOT/.env"
 
-          echo "Production .env created successfully."
+          echo ".env created successfully."
 
-      # =========================================================
-      # 7. Prepare release keystore from GitHub Secret
-      # =========================================================
+      # =====================================================
+      # 8. Prepare release keystore
+      # =====================================================
       - name: Prepare release keystore
         shell: bash
         env:
@@ -158,24 +183,26 @@ jobs:
         run: |
           set -euo pipefail
 
+          PROJECT_ROOT="$(cat project_root.txt)"
+
           if [[ -z "${KEYSTORE_BASE64:-}" ]]; then
-            echo "ERROR: GitHub Secret KEYSTORE_BASE64 is missing."
+            echo "ERROR: KEYSTORE_BASE64 secret is missing."
             exit 1
           fi
 
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > \
-            "$PROJECT_DIR/my-upload-key.jks"
+            "$PROJECT_ROOT/my-upload-key.jks"
 
-          if [[ ! -s "$PROJECT_DIR/my-upload-key.jks" ]]; then
-            echo "ERROR: Release keystore was not created correctly."
+          if [[ ! -s "$PROJECT_ROOT/my-upload-key.jks" ]]; then
+            echo "ERROR: Keystore was not created correctly."
             exit 1
           fi
 
-          echo "Release keystore prepared successfully."
+          echo "Release keystore prepared."
 
-      # =========================================================
-      # 8. Verify signing secrets
-      # =========================================================
+      # =====================================================
+      # 9. Verify signing secrets
+      # =====================================================
       - name: Verify signing configuration
         shell: bash
         env:
@@ -186,29 +213,31 @@ jobs:
           set -euo pipefail
 
           if [[ ! -f "$KEYSTORE_PATH" ]]; then
-            echo "ERROR: Keystore file not found."
+            echo "ERROR: Release keystore not found."
             exit 1
           fi
 
           if [[ -z "${STORE_PASSWORD:-}" ]]; then
-            echo "ERROR: GitHub Secret STORE_PASSWORD is missing."
+            echo "ERROR: STORE_PASSWORD secret is missing."
             exit 1
           fi
 
           if [[ -z "${KEY_PASSWORD:-}" ]]; then
-            echo "ERROR: GitHub Secret KEY_PASSWORD is missing."
+            echo "ERROR: KEY_PASSWORD secret is missing."
             exit 1
           fi
 
           echo "Signing configuration is ready."
 
-      # =========================================================
-      # 9. Verify Java and Gradle
-      # =========================================================
+      # =====================================================
+      # 10. Verify Java and Gradle
+      # =====================================================
       - name: Verify Java and Gradle
         shell: bash
         run: |
           set -euo pipefail
+
+          PROJECT_ROOT="$(cat project_root.txt)"
 
           echo "Java version:"
           java -version
@@ -216,12 +245,12 @@ jobs:
           echo ""
           echo "Gradle version:"
 
-          cd "$PROJECT_DIR"
+          cd "$PROJECT_ROOT"
           ./gradlew --version
 
-      # =========================================================
-      # 10. Build signed release AAB
-      # =========================================================
+      # =====================================================
+      # 11. Build signed release AAB
+      # =====================================================
       - name: Build signed Partner release AAB
         shell: bash
         env:
@@ -231,55 +260,67 @@ jobs:
         run: |
           set -euo pipefail
 
-          cd "$PROJECT_DIR"
+          PROJECT_ROOT="$(cat project_root.txt)"
 
-          echo "Starting clean Partner release build..."
+          cd "$PROJECT_ROOT"
+
+          echo "Starting Partner release build..."
 
           ./gradlew clean bundleRelease \
             --no-daemon \
             --stacktrace
 
-      # =========================================================
-      # 11. Verify generated AAB
-      # =========================================================
-      - name: Verify generated AAB
+      # =====================================================
+      # 12. Locate generated AAB
+      # =====================================================
+      - name: Locate generated AAB
         shell: bash
         run: |
           set -euo pipefail
 
-          AAB_FILE="$PROJECT_DIR/app/build/outputs/bundle/release/app-release.aab"
+          PROJECT_ROOT="$(cat project_root.txt)"
 
-          if [[ ! -f "$AAB_FILE" ]]; then
-            echo "ERROR: Expected Partner AAB was not generated."
+          AAB_FILE="$(find "$PROJECT_ROOT/app/build/outputs/bundle" \
+            -type f \
+            -name "*.aab" \
+            -print -quit)"
+
+          if [[ -z "$AAB_FILE" ]]; then
+            echo "ERROR: No AAB was generated."
+
             echo ""
-            echo "Available bundle files:"
-            find "$PROJECT_DIR/app/build/outputs/bundle" \
+            echo "Build output:"
+            find "$PROJECT_ROOT/app/build/outputs" \
               -type f \
               -print 2>/dev/null || true
+
             exit 1
           fi
 
-          echo "Partner AAB generated successfully:"
-          ls -lh "$AAB_FILE"
+          echo "AAB found:"
+          echo "$AAB_FILE"
 
-      # =========================================================
-      # 12. Prepare final AAB
-      # =========================================================
-      - name: Prepare final Partner AAB
+          cp "$AAB_FILE" "$GITHUB_WORKSPACE/baatly-partner-release.aab"
+
+      # =====================================================
+      # 13. Verify final AAB
+      # =====================================================
+      - name: Verify final AAB
         shell: bash
         run: |
           set -euo pipefail
 
-          cp \
-            "$PROJECT_DIR/app/build/outputs/bundle/release/app-release.aab" \
-            "$GITHUB_WORKSPACE/baatly-partner-release.aab"
+          if [[ ! -f "baatly-partner-release.aab" ]]; then
+            echo "ERROR: Final Partner AAB not found."
+            exit 1
+          fi
 
           echo "Final Partner AAB:"
-          ls -lh "$GITHUB_WORKSPACE/baatly-partner-release.aab"
+          ls -lh baatly-partner-release.aab
 
-      # =========================================================
-      # 13. Upload AAB as GitHub Artifact
-      # =========================================================
+      # =====================================================
+      # 14. Upload AAB artifact
+      # =====================================================
       - name: Upload Partner AAB
         uses: actions/upload-artifact@v4
         with:
@@ -288,14 +329,18 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # =========================================================
-      # 14. Cleanup sensitive files
-      # =========================================================
+      # =====================================================
+      # 15. Cleanup sensitive files
+      # =====================================================
       - name: Cleanup sensitive files
         if: always()
         shell: bash
         run: |
-          rm -f "$PROJECT_DIR/my-upload-key.jks" || true
-          rm -f "$PROJECT_DIR/.env" || true
+          PROJECT_ROOT="$(cat project_root.txt 2>/dev/null || true)"
 
-          echo "Sensitive build files cleaned up."
+          if [[ -n "$PROJECT_ROOT" ]]; then
+            rm -f "$PROJECT_ROOT/my-upload-key.jks" || true
+            rm -f "$PROJECT_ROOT/.env" || true
+          fi
+
+          echo "Cleanup completed." 
