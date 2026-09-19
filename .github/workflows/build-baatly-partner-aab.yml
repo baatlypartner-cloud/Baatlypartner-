@@ -1,0 +1,301 @@
+name: Baatly Partner App AAB
+
+on:
+  push: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Baatly Partner Release AAB
+    runs-on: ubuntu-latest
+
+    env:
+      SOURCE_ZIP: "baatly-partner (6) (14).zip"
+      PROJECT_DIR: "baatly-partner-source"
+
+    steps:
+
+      # =========================================================
+      # 1. Checkout repository
+      # =========================================================
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # =========================================================
+      # 2. Setup JDK 17
+      # =========================================================
+      - name: Setup Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      # =========================================================
+      # 3. Verify source ZIP
+      # =========================================================
+      - name: Verify source ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking Partner App source ZIP..."
+
+          if [[ ! -f "$SOURCE_ZIP" ]]; then
+            echo ""
+            echo "ERROR: Source ZIP not found."
+            echo "Expected file:"
+            echo "$SOURCE_ZIP"
+            echo ""
+            echo "ZIP files found in repository:"
+            find . -maxdepth 2 -type f -iname "*.zip" -print || true
+            exit 1
+          fi
+
+          echo ""
+          echo "Source ZIP found:"
+          ls -lh "$SOURCE_ZIP"
+
+      # =========================================================
+      # 4. Extract ZIP
+      # =========================================================
+      - name: Extract Partner project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf "$PROJECT_DIR"
+          mkdir -p "$PROJECT_DIR"
+
+          unzip -q "$SOURCE_ZIP" -d "$PROJECT_DIR"
+
+          echo "ZIP extracted successfully."
+
+      # =========================================================
+      # 5. Verify exact Android project structure
+      # =========================================================
+      - name: Verify Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$PROJECT_DIR/gradlew" ]]; then
+            echo "ERROR: gradlew not found."
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/settings.gradle.kts" ]]; then
+            echo "ERROR: settings.gradle.kts not found."
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/build.gradle.kts" ]]; then
+            echo "ERROR: Root build.gradle.kts not found."
+            exit 1
+          fi
+
+          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
+            echo "ERROR: app/build.gradle.kts not found."
+            exit 1
+          fi
+
+          if [[ ! -d "$PROJECT_DIR/app" ]]; then
+            echo "ERROR: app module not found."
+            exit 1
+          fi
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          echo "Partner Android project verified successfully."
+
+      # =========================================================
+      # 6. Create production .env from GitHub Secrets
+      # =========================================================
+      - name: Create production environment
+        shell: bash
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+          AGORA_APP_ID: ${{ secrets.AGORA_APP_ID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${SUPABASE_URL:-}" ]]; then
+            echo "ERROR: GitHub Secret SUPABASE_URL is missing."
+            exit 1
+          fi
+
+          if [[ -z "${SUPABASE_PUBLISHABLE_KEY:-}" ]]; then
+            echo "ERROR: GitHub Secret SUPABASE_PUBLISHABLE_KEY is missing."
+            exit 1
+          fi
+
+          if [[ -z "${AGORA_APP_ID:-}" ]]; then
+            echo "ERROR: GitHub Secret AGORA_APP_ID is missing."
+            exit 1
+          fi
+
+          {
+            printf 'SUPABASE_URL=%s\n' "$SUPABASE_URL"
+            printf 'SUPABASE_PUBLISHABLE_KEY=%s\n' "$SUPABASE_PUBLISHABLE_KEY"
+            printf 'AGORA_APP_ID=%s\n' "$AGORA_APP_ID"
+          } > "$PROJECT_DIR/.env"
+
+          chmod 600 "$PROJECT_DIR/.env"
+
+          echo "Production .env created successfully."
+
+      # =========================================================
+      # 7. Prepare release keystore from GitHub Secret
+      # =========================================================
+      - name: Prepare release keystore
+        shell: bash
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${KEYSTORE_BASE64:-}" ]]; then
+            echo "ERROR: GitHub Secret KEYSTORE_BASE64 is missing."
+            exit 1
+          fi
+
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > \
+            "$PROJECT_DIR/my-upload-key.jks"
+
+          if [[ ! -s "$PROJECT_DIR/my-upload-key.jks" ]]; then
+            echo "ERROR: Release keystore was not created correctly."
+            exit 1
+          fi
+
+          echo "Release keystore prepared successfully."
+
+      # =========================================================
+      # 8. Verify signing secrets
+      # =========================================================
+      - name: Verify signing configuration
+        shell: bash
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/baatly-partner-source/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! -f "$KEYSTORE_PATH" ]]; then
+            echo "ERROR: Keystore file not found."
+            exit 1
+          fi
+
+          if [[ -z "${STORE_PASSWORD:-}" ]]; then
+            echo "ERROR: GitHub Secret STORE_PASSWORD is missing."
+            exit 1
+          fi
+
+          if [[ -z "${KEY_PASSWORD:-}" ]]; then
+            echo "ERROR: GitHub Secret KEY_PASSWORD is missing."
+            exit 1
+          fi
+
+          echo "Signing configuration is ready."
+
+      # =========================================================
+      # 9. Verify Java and Gradle
+      # =========================================================
+      - name: Verify Java and Gradle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Java version:"
+          java -version
+
+          echo ""
+          echo "Gradle version:"
+
+          cd "$PROJECT_DIR"
+          ./gradlew --version
+
+      # =========================================================
+      # 10. Build signed release AAB
+      # =========================================================
+      - name: Build signed Partner release AAB
+        shell: bash
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/baatly-partner-source/my-upload-key.jks
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          cd "$PROJECT_DIR"
+
+          echo "Starting clean Partner release build..."
+
+          ./gradlew clean bundleRelease \
+            --no-daemon \
+            --stacktrace
+
+      # =========================================================
+      # 11. Verify generated AAB
+      # =========================================================
+      - name: Verify generated AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AAB_FILE="$PROJECT_DIR/app/build/outputs/bundle/release/app-release.aab"
+
+          if [[ ! -f "$AAB_FILE" ]]; then
+            echo "ERROR: Expected Partner AAB was not generated."
+            echo ""
+            echo "Available bundle files:"
+            find "$PROJECT_DIR/app/build/outputs/bundle" \
+              -type f \
+              -print 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Partner AAB generated successfully:"
+          ls -lh "$AAB_FILE"
+
+      # =========================================================
+      # 12. Prepare final AAB
+      # =========================================================
+      - name: Prepare final Partner AAB
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp \
+            "$PROJECT_DIR/app/build/outputs/bundle/release/app-release.aab" \
+            "$GITHUB_WORKSPACE/baatly-partner-release.aab"
+
+          echo "Final Partner AAB:"
+          ls -lh "$GITHUB_WORKSPACE/baatly-partner-release.aab"
+
+      # =========================================================
+      # 13. Upload AAB as GitHub Artifact
+      # =========================================================
+      - name: Upload Partner AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: baatly-partner-release-aab
+          path: baatly-partner-release.aab
+          if-no-files-found: error
+          retention-days: 30
+
+      # =========================================================
+      # 14. Cleanup sensitive files
+      # =========================================================
+      - name: Cleanup sensitive files
+        if: always()
+        shell: bash
+        run: |
+          rm -f "$PROJECT_DIR/my-upload-key.jks" || true
+          rm -f "$PROJECT_DIR/.env" || true
+
+          echo "Sensitive build files cleaned up."
