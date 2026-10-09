@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SOURCE_ZIP: "baatly-partner (6) (16).zip"
+      SOURCE_ZIP: "baatly-partner (6) (18).zip"
       PROJECT_DIR: "baatly-partner-source"
 
     steps:
