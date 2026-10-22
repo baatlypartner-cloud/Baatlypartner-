@@ -13,8 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SOURCE_ZIP: "baatly-partner-meta-sdk-version35.zip
-      "
+      SOURCE_ZIP: "BAATLY-v35.zip"
       PROJECT_DIR: "baatly-partner-source"
 
     steps:
