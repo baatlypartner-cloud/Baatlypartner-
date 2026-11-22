@@ -39,33 +39,27 @@ jobs:
           set -Eeuo pipefail
 
           mapfile -t ZIP_FILES < <(
-            find "$GITHUB_WORKSPACE" \
-              -type f -iname '*partner*.zip' \
+            find "$GITHUB_WORKSPACE" -maxdepth 2 -type f -iname '*partner*.zip' \
               -not -path '*/.git/*' \
-              -not -path '*/.partner-build-src/*' \
-              | sort
+              -not -path '*/.partner-build-src/*' | sort
           )
 
           if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
-            echo "::error::Exactly one Partner ZIP is required."
+            echo "::error::Keep exactly one Partner ZIP in the repository. Found: ${#ZIP_FILES[@]}"
             printf '%s\n' "${ZIP_FILES[@]}"
             exit 1
           fi
 
           EXTRACT_DIR="$GITHUB_WORKSPACE/.partner-build-src"
-
           rm -rf "$EXTRACT_DIR"
           mkdir -p "$EXTRACT_DIR"
-
           unzip -q "${ZIP_FILES[0]}" -d "$EXTRACT_DIR"
 
-          WRAPPER=$(find "$EXTRACT_DIR" \
-            -type f -name gradlew \
-            -not -path '*/build/*' \
-            -print -quit)
+          WRAPPER=$(find "$EXTRACT_DIR" -type f -name gradlew \
+            -not -path '*/build/*' -print -quit)
 
           if [ -z "$WRAPPER" ]; then
-            echo "::error::gradlew missing inside ZIP."
+            echo "::error::gradlew was not found inside the Partner ZIP."
             exit 1
           fi
 
@@ -73,15 +67,53 @@ jobs:
 
           test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
           test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/settings.gradle.kts"
           test -f "$PROJECT_DIR/.env.example"
 
           chmod +x "$WRAPPER"
 
           echo "ANDROID_PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found Android project: $PROJECT_DIR"
 
-          echo "Android project found: $PROJECT_DIR"
+      - name: Configure Maven Central Mirror
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
-      - name: Prepare Maps Configuration
+          SETTINGS_FILE="$ANDROID_PROJECT_DIR/settings.gradle.kts"
+
+          python3 - "$SETTINGS_FILE" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          source = path.read_text()
+
+          mirror = 'maven { url = uri("https://maven-central.storage-download.googleapis.com/maven2/") }'
+
+          if "maven-central.storage-download.googleapis.com" not in source:
+              count = source.count("mavenCentral()")
+
+              if count < 1:
+                  raise SystemExit(
+                      "settings.gradle.kts has no mavenCentral() repository"
+                  )
+
+              source = source.replace(
+                  "mavenCentral()",
+                  mirror + "\n    mavenCentral()"
+              )
+
+              path.write_text(source)
+              print(f"Added mirror before {count} Maven Central entries.")
+          else:
+              print("Maven Central mirror already configured.")
+          PY
+
+          echo "Updated repositories:"
+          grep -n -E 'maven-central.storage|mavenCentral\(\)' "$SETTINGS_FILE"
+
+      - name: Prepare Maps API Configuration
         shell: bash
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
@@ -89,7 +121,7 @@ jobs:
           set -Eeuo pipefail
 
           if [ -z "${MAPS_API_KEY:-}" ]; then
-            echo "::error::MAPS_API_KEY secret missing."
+            echo "::error::Add the MAPS_API_KEY repository secret."
             exit 1
           fi
 
@@ -120,28 +152,55 @@ jobs:
           path.write_text("\n".join(output) + "\n")
           PY
 
-      - name: Kotlin Release Compilation
+      - name: Compile Release Kotlin With Retry
         id: kotlin_compile
         working-directory: ${{ env.ANDROID_PROJECT_DIR }}
         shell: bash
         env:
           MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
         run: |
-          set -o pipefail
+          set -uo pipefail
 
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            --info \
-            :app:compileReleaseKotlin \
-            2>&1 | tee "$GITHUB_WORKSPACE/kotlin-error.log"
+          LOG_FILE="$GITHUB_WORKSPACE/partner-kotlin-compile.log"
+          RESULT=1
 
-      - name: Upload Kotlin Error Log
+          for ATTEMPT in 1 2 3; do
+            echo "Kotlin compile attempt $ATTEMPT/3"
+
+            ./gradlew \
+              --no-daemon \
+              --max-workers=2 \
+              --stacktrace \
+              --info \
+              :app:compileReleaseKotlin \
+              2>&1 | tee "$LOG_FILE"
+
+            RESULT=${PIPESTATUS[0]}
+
+            if [ "$RESULT" -eq 0 ]; then
+              exit 0
+            fi
+
+            if grep -Eqi \
+              '429 Too Many Requests|status code 429|HTTP 429' \
+              "$LOG_FILE" && [ "$ATTEMPT" -lt 3 ]; then
+
+              echo "Maven rate limit detected. Retrying..."
+              sleep $((ATTEMPT * 20))
+              continue
+            fi
+
+            exit "$RESULT"
+          done
+
+          exit "$RESULT"
+
+      - name: Upload Kotlin Error Diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: BAATLY-Kotlin-Diagnostics-${{ github.run_number }}
-          path: ${{ github.workspace }}/kotlin-error.log
+          path: ${{ github.workspace }}/partner-kotlin-compile.log
           if-no-files-found: warn
           retention-days: 14
 
@@ -158,7 +217,7 @@ jobs:
             KEYSTORE_BASE64 STORE_PASSWORD KEY_PASSWORD
           do
             if [ -z "${!secret_name:-}" ]; then
-              echo "::error::Missing secret: $secret_name"
+              echo "::error::Missing repository secret: $secret_name"
               exit 1
             fi
           done
@@ -171,19 +230,23 @@ jobs:
 
       - name: Build Release APK and AAB
         working-directory: ${{ env.ANDROID_PROJECT_DIR }}
+        shell: bash
         env:
-          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
           KEYSTORE_PATH: ${{ env.ANDROID_PROJECT_DIR }}/my-upload-key.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
         run: |
+          set -Eeuo pipefail
+
           ./gradlew \
             --no-daemon \
+            --max-workers=2 \
             --stacktrace \
             :app:assembleRelease \
             :app:bundleRelease
 
-      - name: Upload APK and AAB
+      - name: Upload APK and AAB Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: BAATLY-Partner-${{ github.run_number }}
@@ -193,7 +256,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Create GitHub Release
+      - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
