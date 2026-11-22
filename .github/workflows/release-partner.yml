@@ -1,4 +1,4 @@
-name: BAATLY Partner APK and AAB Build
+name: Build BAATLY Partner APK and AAB
 
 on:
   push:
@@ -30,75 +30,122 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Find and Extract Partner ZIP
         shell: bash
         run: |
           set -Eeuo pipefail
 
           mapfile -t ZIP_FILES < <(
-            find "$GITHUB_WORKSPACE" -type f -iname '*partner*.zip' \
+            find "$GITHUB_WORKSPACE" \
+              -type f -iname '*partner*.zip' \
               -not -path '*/.git/*' \
-              -not -path '*/.github/*' \
               -not -path '*/.partner-build-src/*' \
               | sort
           )
 
-          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            mapfile -t ZIP_FILES < <(
-              find "$GITHUB_WORKSPACE" -type f -iname '*.zip' \
-                -not -path '*/.git/*' \
-                -not -path '*/.github/*' \
-                -not -path '*/.partner-build-src/*' \
-                | sort
-            )
-          fi
-
           if [ "${#ZIP_FILES[@]}" -ne 1 ]; then
-            echo "::error::Repository में एक ही Partner ZIP होनी चाहिए। मिलीं: ${#ZIP_FILES[@]}"
+            echo "::error::Exactly one Partner ZIP is required."
             printf '%s\n' "${ZIP_FILES[@]}"
             exit 1
           fi
 
-          ZIP_FILE="${ZIP_FILES[0]}"
           EXTRACT_DIR="$GITHUB_WORKSPACE/.partner-build-src"
-
-          echo "ZIP found: $ZIP_FILE"
 
           rm -rf "$EXTRACT_DIR"
           mkdir -p "$EXTRACT_DIR"
 
-          unzip -q "$ZIP_FILE" -d "$EXTRACT_DIR"
+          unzip -q "${ZIP_FILES[0]}" -d "$EXTRACT_DIR"
 
-          WRAPPER_PATH=$(find "$EXTRACT_DIR" -type f -name gradlew \
-            -not -path '*/build/*' -print -quit)
+          WRAPPER=$(find "$EXTRACT_DIR" \
+            -type f -name gradlew \
+            -not -path '*/build/*' \
+            -print -quit)
 
-          if [ -z "$WRAPPER_PATH" ]; then
-            echo "::error::ZIP के अंदर gradlew नहीं मिला।"
+          if [ -z "$WRAPPER" ]; then
+            echo "::error::gradlew missing inside ZIP."
             exit 1
           fi
 
-          PROJECT_DIR=$(dirname "$WRAPPER_PATH")
+          PROJECT_DIR="$(dirname "$WRAPPER")"
 
-          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-            echo "::error::Gradle wrapper properties missing."
-            exit 1
-          fi
+          test -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.properties"
+          test -f "$PROJECT_DIR/app/build.gradle.kts"
+          test -f "$PROJECT_DIR/.env.example"
 
-          if [ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]; then
-            echo "::error::app/build.gradle.kts नहीं मिला।"
-            exit 1
-          fi
-
-          chmod +x "$WRAPPER_PATH"
+          chmod +x "$WRAPPER"
 
           echo "ANDROID_PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-          echo "Android project: $PROJECT_DIR"
+          echo "Android project found: $PROJECT_DIR"
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+      - name: Prepare Maps Configuration
+        shell: bash
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        run: |
+          set -Eeuo pipefail
 
-      - name: Prepare Signing Keystore
+          if [ -z "${MAPS_API_KEY:-}" ]; then
+            echo "::error::MAPS_API_KEY secret missing."
+            exit 1
+          fi
+
+          cp "$ANDROID_PROJECT_DIR/.env.example" \
+             "$ANDROID_PROJECT_DIR/.env"
+
+          python3 - "$ANDROID_PROJECT_DIR/.env" "$MAPS_API_KEY" <<'PY'
+          from pathlib import Path
+          import sys
+
+          path = Path(sys.argv[1])
+          key = sys.argv[2]
+
+          lines = path.read_text().splitlines()
+          output = []
+          replaced = False
+
+          for line in lines:
+              if line.startswith("MAPS_API_KEY="):
+                  output.append("MAPS_API_KEY=" + key)
+                  replaced = True
+              else:
+                  output.append(line)
+
+          if not replaced:
+              output.append("MAPS_API_KEY=" + key)
+
+          path.write_text("\n".join(output) + "\n")
+          PY
+
+      - name: Kotlin Release Compilation
+        id: kotlin_compile
+        working-directory: ${{ env.ANDROID_PROJECT_DIR }}
+        shell: bash
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        run: |
+          set -o pipefail
+
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
+            --info \
+            :app:compileReleaseKotlin \
+            2>&1 | tee "$GITHUB_WORKSPACE/kotlin-error.log"
+
+      - name: Upload Kotlin Error Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: BAATLY-Kotlin-Diagnostics-${{ github.run_number }}
+          path: ${{ github.workspace }}/kotlin-error.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Prepare Release Keystore
         shell: bash
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -107,34 +154,36 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          KEYSTORE="$ANDROID_PROJECT_DIR/my-upload-key.jks"
+          for secret_name in \
+            KEYSTORE_BASE64 STORE_PASSWORD KEY_PASSWORD
+          do
+            if [ -z "${!secret_name:-}" ]; then
+              echo "::error::Missing secret: $secret_name"
+              exit 1
+            fi
+          done
 
-          if [ -n "${KEYSTORE_BASE64:-}" ]; then
-            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE"
-          fi
+          printf '%s' "$KEYSTORE_BASE64" \
+            | base64 --decode \
+            > "$ANDROID_PROJECT_DIR/my-upload-key.jks"
 
-          if [ ! -f "$KEYSTORE" ]; then
-            echo "::error::Signing keystore नहीं मिली।"
-            exit 1
-          fi
-
-          if [ -z "${STORE_PASSWORD:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
-            echo "::error::STORE_PASSWORD या KEY_PASSWORD secret missing है।"
-            exit 1
-          fi
+          test -s "$ANDROID_PROJECT_DIR/my-upload-key.jks"
 
       - name: Build Release APK and AAB
         working-directory: ${{ env.ANDROID_PROJECT_DIR }}
         env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          KEYSTORE_PATH: ${{ env.ANDROID_PROJECT_DIR }}/my-upload-key.jks
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-          KEYSTORE_PATH: ${{ env.ANDROID_PROJECT_DIR }}/my-upload-key.jks
         run: |
-          ./gradlew --no-daemon --stacktrace \
+          ./gradlew \
+            --no-daemon \
+            --stacktrace \
             :app:assembleRelease \
             :app:bundleRelease
 
-      - name: Upload APK and AAB Artifacts
+      - name: Upload APK and AAB
         uses: actions/upload-artifact@v4
         with:
           name: BAATLY-Partner-${{ github.run_number }}
@@ -144,7 +193,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Publish GitHub Release
+      - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
